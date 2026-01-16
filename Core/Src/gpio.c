@@ -75,7 +75,7 @@ void MX_GPIO_Init(void)
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI7_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(EXTI7_IRQn);
+  // HAL_NVIC_EnableIRQ(EXTI7_IRQn);
 
 }
 

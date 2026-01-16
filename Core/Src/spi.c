@@ -1,50 +1,159 @@
 /* USER CODE BEGIN Header */
 /**
-  ******************************************************************************
-  * @file    spi.c
-  * @brief   This file provides code for the configuration
-  *          of the SPI instances.
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+ ******************************************************************************
+ * @file    spi.c
+ * @brief   This file provides code for the configuration
+ *          of the SPI instances.
+ ******************************************************************************
+ * @attention
+ *
+ * Copyright (c) 2026 STMicroelectronics.
+ * All rights reserved.
+ *
+ * This software is licensed under terms that can be found in the LICENSE file
+ * in the root directory of this software component.
+ * If no LICENSE file comes with this software, it is provided AS-IS.
+ *
+ ******************************************************************************
+ */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "spi.h"
 
 /* USER CODE BEGIN 0 */
-// 全局状�?�机
-typedef enum {
-    DMA_STATE_IDLE,
-    DMA_STATE_TX_ADDR,
-    DMA_STATE_RX_DATA,
-    DMA_STATE_COMPLETE
-} dma_state_t;
+#include "usart.h"
+#include "ADXL355.h"
+#define ADXL_RX_LEN 288
+#define ADXL_CMD_REG FIFO_DATA // 替换为你的读寄存器起始地址
+#define ADXL_SPI SPI1
+#define ADXL_CS_PORT GPIOA
+#define ADXL_CS_PIN GPIO_PIN_15
 
-static uint8_t dma_rx_buffer[256];
+static uint8_t adxl_tx_buf[1 + ADXL_RX_LEN] __attribute__((aligned(4)));
+static uint8_t adxl_rx_buf[1 + ADXL_RX_LEN] __attribute__((aligned(4)));
+static volatile uint8_t adxl_busy = 0;
 
-static dma_state_t dma_state = DMA_STATE_IDLE;
-static uint16_t dma_data_len = 0;
+static void adxl_cs_low(void) { HAL_GPIO_WritePin(ADXL_CS_PORT, ADXL_CS_PIN, GPIO_PIN_RESET); }
+static void adxl_cs_high(void) { HAL_GPIO_WritePin(ADXL_CS_PORT, ADXL_CS_PIN, GPIO_PIN_SET); }
+void ADXL355_DMA_Read_Prep(uint8_t start_reg)
+{
+  adxl_tx_buf[0] = (start_reg << 1) | 0x01; // 读命令
+  for (uint16_t i = 1; i < sizeof(adxl_tx_buf); ++i)
+    adxl_tx_buf[i] = 0x00; // dummy
+}
 
+void ADXL355_DMA_Start(void)
+{
+
+  //printf("ADXL355_DMA_Start1\r\n");
+  if (HAL_SPI_GetState(&hspi1) != HAL_SPI_STATE_READY || adxl_busy)
+    return;
+  //printf("ADXL355_DMA_Start2\r\n");
+  adxl_busy = 1;
+  adxl_cs_low();
+  if (HAL_SPI_TransmitReceive_DMA(&hspi1, adxl_tx_buf, adxl_rx_buf, sizeof(adxl_tx_buf)) != HAL_OK)
+  {
+    //printf("ADXL355_DMA_Start3\r\n");
+    adxl_cs_high();
+    adxl_busy = 0;
+  }
+  //printf("ADXL355_DMA_Start4\r\n");
+}
+
+void get_adxl355_fifo_data(uint8_t *dat)
+{
+	
+	//#warning 此函数消耗至少 ADXL355_LEN*9*2byte(若ADXL355_LEN=32,则消耗32*9*2=576byte) RAM 注意RAM是否够用
+	uint8_t loop,loop_len,adxl355_max_xyz_len;
+	
+	//uint8_t dat[32*3*3]={0};//一组数据分为3个轴，一个轴3个byte数据，共ADXL355_LEN*3*3 byte
+	struct ADXL355_Data_int32 buff[32] = {{0,0,0}};//缓存整理后的数据
+	//先连续读取32组数据,然后再查找哪一组数据是X轴
+	//SPI_ADXL355_Read_n_Bytes(FIFO_DATA,(uint8_t*)dat,ADXL355_LEN*3*3);
+	
+	//查找X轴 x轴的 AXIS MARKER为1 EMPTY INDICATOR为0
+	loop_len = 32 * 3;//一组数据分为3个轴，共ADXL355_LEN*3个轴
+	//printf("loop_len = %d \r\n",loop_len);
+	
+	
+	//查找X轴 x轴的 AXIS MARKER为1 EMPTY INDICATOR为0
+	loop_len = 32 * 3;	//一组数据分为3个轴，共ADXL355_LEN*3个轴的数据
+	for(loop = loop_len;loop>0;loop--)
+	{
+		//printf("****X-AXIS MARKER %02x\r\n",(dat[loop*3]&0x03));
+		if((dat[loop*3-1]&0x03) == 0x01) 
+		{
+			//printf("****X-AXIS MARKER %02x\r\n",dat[loop*3-1]);
+			break;  	
+		}
+	}
+	
+	//printf("loop = %d \r\n",loop);
+	//此时 loop的值为x轴数据的位置,一组数据有XYZ三轴
+	adxl355_max_xyz_len = (loop+2)/3;//缓存中最大的X/Y/Z加速度的组数
+	//printf("adxl355_max_xyz_len:%d\r\n",adxl355_max_xyz_len);
+	
+	//将原始数据解析成实际数据 只有21位有效值
+	for(loop = 0;loop < adxl355_max_xyz_len;loop++)
+	{
+		buff[loop].i32SensorX=((uint32_t)dat[loop*9]<<16)|((uint32_t)dat[loop*9+1]<<8)|dat[loop*9+2];
+		buff[loop].i32SensorX=ADXL355_Acceleration_Data_Conversion(buff[loop].i32SensorX);
+
+		buff[loop].i32SensorY=((uint32_t)dat[loop*9+3]<<16)|((uint32_t)dat[loop*9+4]<<8)|dat[loop*9+5];
+		buff[loop].i32SensorY=ADXL355_Acceleration_Data_Conversion(buff[loop].i32SensorY);
+
+		buff[loop].i32SensorZ=((uint32_t)dat[loop*9+6]<<16)|((uint32_t)dat[loop*9+7]<<8)|dat[loop*9+8];
+		buff[loop].i32SensorZ=ADXL355_Acceleration_Data_Conversion(buff[loop].i32SensorZ);
+		
+		//printf("0x%05lX  0x%05lX 0x%05lX\r\n",((int32_t)buff[loop].i32SensorX),((int32_t)buff[loop].i32SensorY),((int32_t)buff[loop].i32SensorZ));
+		printf("%lf %lf %lf\r\n",((int32_t)buff[loop].i32SensorX)*15.6e-6, ((int32_t)buff[loop].i32SensorY)*15.6e-6,((int32_t)buff[loop].i32SensorZ)*15.6e-6);
+	}
+	
+	// //获取数据，fifo,先进先出，最后的最新
+	// if(adxl355_max_xyz_len==0)//没有有效的数据，返回buff[0],此时buff[0]的值全为0
+	// {
+	// 	printf("adxl355_max_xyz_len==0\r\n");
+	// 	for(loop=0;loop<len;loop++)
+	// 	{
+	// 		target[loop] = buff[0];
+	// 	}
+	// }
+	// else if(adxl355_max_xyz_len<len)//有效数据数量小于要获取的数据量
+	// {
+	// 	printf("adxl355_max_xyz_len<len\r\n");
+	// 	for(loop=0;loop<adxl355_max_xyz_len;loop++)//先填充有效的数据
+	// 	{
+	// 		target[loop] = buff[loop];
+	// 	}
+		
+	// 	for(loop=adxl355_max_xyz_len;loop<len;loop++)//不够的数据直接填充0
+	// 	{
+	// 		target[loop].i32SensorX = 0;
+	// 		target[loop].i32SensorY = 0;
+	// 		target[loop].i32SensorZ = 0;
+	// 	}
+	// }
+	// else//有效数据数量大于要获取的数据量
+	// {
+	// 	//printf("other case\r\n");
+	// 	for(loop=0;loop<len;loop++)
+	// 	{
+	// 		target[loop] = buff[loop];
+	// 	}
+	// }
+}
 /* USER CODE END 0 */
 
 SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef handle_GPDMA1_Channel0;
+DMA_HandleTypeDef handle_GPDMA1_Channel1;
 
 /* SPI1 init function */
 void MX_SPI1_Init(void)
 {
 
   /* USER CODE BEGIN SPI1_Init 0 */
-
+  ADXL355_DMA_Read_Prep(FIFO_DATA);
   /* USER CODE END SPI1_Init 0 */
 
   SPI_AutonomousModeConfTypeDef HAL_SPI_AutonomousMode_Cfg_Struct = {0};
@@ -88,22 +197,21 @@ void MX_SPI1_Init(void)
   /* USER CODE BEGIN SPI1_Init 2 */
 
   /* USER CODE END SPI1_Init 2 */
-
 }
 
-void HAL_SPI_MspInit(SPI_HandleTypeDef* spiHandle)
+void HAL_SPI_MspInit(SPI_HandleTypeDef *spiHandle)
 {
 
   GPIO_InitTypeDef GPIO_InitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
-  if(spiHandle->Instance==SPI1)
+  if (spiHandle->Instance == SPI1)
   {
-  /* USER CODE BEGIN SPI1_MspInit 0 */
+    /* USER CODE BEGIN SPI1_MspInit 0 */
 
-  /* USER CODE END SPI1_MspInit 0 */
+    /* USER CODE END SPI1_MspInit 0 */
 
-  /** Initializes the peripherals clock
-  */
+    /** Initializes the peripherals clock
+     */
     PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_SPI1;
     PeriphClkInit.Spi1ClockSelection = RCC_SPI1CLKSOURCE_SYSCLK;
     if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
@@ -120,7 +228,7 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef* spiHandle)
     PB4 (NJTRST)     ------> SPI1_MISO
     PB5     ------> SPI1_MOSI
     */
-    GPIO_InitStruct.Pin = GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5;
+    GPIO_InitStruct.Pin = GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -134,13 +242,13 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef* spiHandle)
     handle_GPDMA1_Channel0.Init.BlkHWRequest = DMA_BREQ_SINGLE_BURST;
     handle_GPDMA1_Channel0.Init.Direction = DMA_PERIPH_TO_MEMORY;
     handle_GPDMA1_Channel0.Init.SrcInc = DMA_SINC_FIXED;
-    handle_GPDMA1_Channel0.Init.DestInc = DMA_DINC_FIXED;
+    handle_GPDMA1_Channel0.Init.DestInc = DMA_DINC_INCREMENTED;
     handle_GPDMA1_Channel0.Init.SrcDataWidth = DMA_SRC_DATAWIDTH_BYTE;
     handle_GPDMA1_Channel0.Init.DestDataWidth = DMA_DEST_DATAWIDTH_BYTE;
     handle_GPDMA1_Channel0.Init.Priority = DMA_LOW_PRIORITY_LOW_WEIGHT;
     handle_GPDMA1_Channel0.Init.SrcBurstLength = 1;
     handle_GPDMA1_Channel0.Init.DestBurstLength = 1;
-    handle_GPDMA1_Channel0.Init.TransferAllocatedPort = DMA_SRC_ALLOCATED_PORT0|DMA_DEST_ALLOCATED_PORT0;
+    handle_GPDMA1_Channel0.Init.TransferAllocatedPort = DMA_SRC_ALLOCATED_PORT0 | DMA_DEST_ALLOCATED_PORT0;
     handle_GPDMA1_Channel0.Init.TransferEventMode = DMA_TCEM_BLOCK_TRANSFER;
     handle_GPDMA1_Channel0.Init.Mode = DMA_NORMAL;
     if (HAL_DMA_Init(&handle_GPDMA1_Channel0) != HAL_OK)
@@ -155,23 +263,55 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef* spiHandle)
       Error_Handler();
     }
 
+    /* GPDMA1_REQUEST_SPI1_TX Init */
+    handle_GPDMA1_Channel1.Instance = GPDMA1_Channel1;
+    handle_GPDMA1_Channel1.Init.Request = GPDMA1_REQUEST_SPI1_TX;
+    handle_GPDMA1_Channel1.Init.BlkHWRequest = DMA_BREQ_SINGLE_BURST;
+    handle_GPDMA1_Channel1.Init.Direction = DMA_MEMORY_TO_PERIPH;
+    handle_GPDMA1_Channel1.Init.SrcInc = DMA_SINC_INCREMENTED;
+    handle_GPDMA1_Channel1.Init.DestInc = DMA_DINC_FIXED;
+    handle_GPDMA1_Channel1.Init.SrcDataWidth = DMA_SRC_DATAWIDTH_BYTE;
+    handle_GPDMA1_Channel1.Init.DestDataWidth = DMA_DEST_DATAWIDTH_BYTE;
+    handle_GPDMA1_Channel1.Init.Priority = DMA_LOW_PRIORITY_LOW_WEIGHT;
+    handle_GPDMA1_Channel1.Init.SrcBurstLength = 1;
+    handle_GPDMA1_Channel1.Init.DestBurstLength = 1;
+    handle_GPDMA1_Channel1.Init.TransferAllocatedPort = DMA_SRC_ALLOCATED_PORT0 | DMA_DEST_ALLOCATED_PORT0;
+    handle_GPDMA1_Channel1.Init.TransferEventMode = DMA_TCEM_BLOCK_TRANSFER;
+    handle_GPDMA1_Channel1.Init.Mode = DMA_NORMAL;
+    if (HAL_DMA_Init(&handle_GPDMA1_Channel1) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    __HAL_LINKDMA(spiHandle, hdmatx, handle_GPDMA1_Channel1);
+
+    if (HAL_DMA_ConfigChannelAttributes(&handle_GPDMA1_Channel1, DMA_CHANNEL_NPRIV) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
     /* SPI1 interrupt Init */
     HAL_NVIC_SetPriority(SPI1_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(SPI1_IRQn);
-  /* USER CODE BEGIN SPI1_MspInit 1 */
 
-  /* USER CODE END SPI1_MspInit 1 */
+    /* USER CODE BEGIN SPI1_MspInit 1 */
+    HAL_NVIC_SetPriority(GPDMA1_Channel0_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(GPDMA1_Channel0_IRQn);
+    /* Optional: Enable TX DMA channel IRQ if not enabled elsewhere */
+    HAL_NVIC_SetPriority(GPDMA1_Channel1_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(GPDMA1_Channel1_IRQn);
+    /* USER CODE END SPI1_MspInit 1 */
   }
 }
 
-void HAL_SPI_MspDeInit(SPI_HandleTypeDef* spiHandle)
+void HAL_SPI_MspDeInit(SPI_HandleTypeDef *spiHandle)
 {
 
-  if(spiHandle->Instance==SPI1)
+  if (spiHandle->Instance == SPI1)
   {
-  /* USER CODE BEGIN SPI1_MspDeInit 0 */
+    /* USER CODE BEGIN SPI1_MspDeInit 0 */
 
-  /* USER CODE END SPI1_MspDeInit 0 */
+    /* USER CODE END SPI1_MspDeInit 0 */
     /* Peripheral clock disable */
     __HAL_RCC_SPI1_CLK_DISABLE();
 
@@ -180,16 +320,16 @@ void HAL_SPI_MspDeInit(SPI_HandleTypeDef* spiHandle)
     PB4 (NJTRST)     ------> SPI1_MISO
     PB5     ------> SPI1_MOSI
     */
-    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5);
+    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5);
 
     /* SPI1 DMA DeInit */
     HAL_DMA_DeInit(spiHandle->hdmarx);
 
     /* SPI1 interrupt Deinit */
     HAL_NVIC_DisableIRQ(SPI1_IRQn);
-  /* USER CODE BEGIN SPI1_MspDeInit 1 */
+    /* USER CODE BEGIN SPI1_MspDeInit 1 */
 
-  /* USER CODE END SPI1_MspDeInit 1 */
+    /* USER CODE END SPI1_MspDeInit 1 */
   }
 }
 
@@ -198,20 +338,49 @@ void HAL_SPI_MspDeInit(SPI_HandleTypeDef* spiHandle)
 // 修改后的回调函数
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-  if (hspi->Instance == SPI1 && dma_state == DMA_STATE_TX_ADDR)
-  {
-    // TX地址完成，开始RX数据
-    dma_state = DMA_STATE_RX_DATA;
-    HAL_SPI_Receive_DMA(&hspi1, dma_rx_buffer, dma_data_len);
-  }
 }
 
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-  if (hspi->Instance == SPI1 && dma_state == DMA_STATE_RX_DATA)
+}
+
+void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+  if (hspi->Instance == ADXL_SPI)
   {
-    dma_state = DMA_STATE_COMPLETE;
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET); // CS�?
+    adxl_cs_high();
+    get_adxl355_fifo_data(&adxl_rx_buf[1]);
+    // 有效数据在 adxl_rx_buf[1 .. 288]
+    // ADXL355_ProcessData(&adxl_rx_buf[1], ADXL_RX_LEN); // 自行实现处理
+    // for(int i=0;i<ADXL_RX_LEN;i+=3)
+    // {
+    //   printf("0x%02X 0x%02X 0x%02X \r\n",adxl_rx_buf[1+i], adxl_rx_buf[2+i], adxl_rx_buf[3+i]);
+
+    // }
+    adxl_busy = 0;
+
+    //printf("DMA RX Complete\r\n");
+  }
+}
+
+void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == GPIO_PIN_7) // PB7
+  {
+    printf("INT\r\n");
+     ADXL355_DMA_Start();
+    //SPI_ADXL355_Read_n_Bytes(FIFO_DATA,(uint8_t*)adxl_rx_buf,32*3*3);
+
+  }
+}
+
+// SPI 错误回调
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
+{
+  if (hspi->Instance == ADXL_SPI)
+  {
+    adxl_cs_high();
+    adxl_busy = 0;
   }
 }
 

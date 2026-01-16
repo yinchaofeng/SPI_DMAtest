@@ -58,7 +58,7 @@ static void SystemPower_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+float32_t fsr =0.0f; //量程选择 2/4/8g
 /* USER CODE END 0 */
 
 /**
@@ -99,14 +99,25 @@ int main(void)
   
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);//355
 	HAL_Delay(20);
-	
-	ADXL355_Init(); 
+	  uint8_t dat[32*3*3]={0};
+	ADXL355_Vibration_Config(&fsr);
+  __HAL_GPIO_EXTI_CLEAR_FALLING_IT(GPIO_PIN_7);
+  HAL_NVIC_EnableIRQ(EXTI7_IRQn);
+  SPI_ADXL355_Read_n_Bytes(FIFO_DATA,(uint8_t*)dat,32*3*3);
+  uint8_t receive = SPI_ADXL355_Read_Byte(STATUS); //读取状态寄存器
+  // printf("0x%02x\r\n",receive);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    //uint8_t receive = SPI_ADXL355_Read_Byte(STATUS); // 读取状态寄存器
+    //printf("0x%02x\r\n", receive);
+
+    // 
+    HAL_Delay(1000);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

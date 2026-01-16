@@ -184,7 +184,7 @@ void ADXL355_Vibration_Config(float32_t *fsr)
 	ADXL355_Set_Samples(samples);
 	samples = ADXL355_Get_Samples();
 	ADXL355_Start_Sensor(); 
-	HAL_Delay(300);
+	HAL_Delay(90);
 	
 	
 	if(samples == 0x02) //1000Hz采集
@@ -513,6 +513,25 @@ void SPI_ADXL355_Write_Byte(uint8_t regAdress, uint8_t data)
 	if(HAL_SPI_Transmit(&hspi1,&readAdress,1,10) != HAL_OK)                            			//read adress读地址
 		return SPI_READ_ERROR;
     if(HAL_SPI_Receive(&hspi1,rcv_buffer,n,10) != HAL_OK)                            
+		return SPI_READ_ERROR;
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET);      //CS = High	
+	
+//	for(int i = 0;i < n; i++)
+//		printf("0x%02x \r\n",rcv_buffer[i]);
+	
+	return SPI_READ_OK;
+}
+
+
+ uint8_t SPI_ADXL355_Read_n_Bytes_DMA(uint8_t regAdress, uint8_t* rcv_buffer, uint16_t n)
+{
+	unsigned char readAdress;
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_RESET);    //CS = LOW
+	readAdress = regAdress << 1;                                            //寄存器的地址7位 左移1位 
+	readAdress |= 0x01;                                                //寄存器的地址7位 最后一位为1表示读取数据 xxxxxxx1
+	if(HAL_SPI_Transmit(&hspi1,&readAdress,1,10) != HAL_OK)                            			//read adress读地址
+		return SPI_READ_ERROR;
+    if(HAL_SPI_Receive_DMA(&hspi1,rcv_buffer,n) != HAL_OK)                            
 		return SPI_READ_ERROR;
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET);      //CS = High	
 	
