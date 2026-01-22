@@ -32,6 +32,7 @@ spi_dmatest/spi.o: ..\Core\Src\spi.c ..\Core\Inc\spi.h ..\Core\Inc\main.h \
   ..\Drivers\STM32U5xx_HAL_Driver\Inc\stm32u5xx_hal_uart.h \
   ..\Drivers\STM32U5xx_HAL_Driver\Inc\stm32u5xx_hal_uart_ex.h \
   ..\Drivers\STM32U5xx_HAL_Driver\Inc\stm32u5xx_hal_exti.h \
+  D:\Program\ Files\MDK\Keil_v5\ARM\ARMCLANG\Bin\..\include\string.h \
   ..\Core\Inc\usart.h \
   D:\Program\ Files\MDK\Keil_v5\ARM\ARMCLANG\Bin\..\include\stdio.h \
   ..\user\ADXL355.h ..\Core\Inc\main.h ..\Core\Inc\gpio.h

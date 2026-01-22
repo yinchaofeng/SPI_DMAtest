@@ -53,7 +53,10 @@
 void SystemClock_Config(void);
 static void SystemPower_Config(void);
 /* USER CODE BEGIN PFP */
-
+// ADXL355 DMA Buffer 函数声明
+extern void ADXL355_DMA_Read_Prep(uint8_t start_reg);
+extern uint16_t ADXL355_Get_Buffer_Count(void);
+extern void ADXL355_Read_Buffer(uint8_t* dest, uint16_t* len);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -99,13 +102,15 @@ int main(void)
   
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);//355
 	HAL_Delay(20);
-	  uint8_t dat[32*3*3]={0};
+	uint8_t dat[32*3*3]={0};//一组数据分为3个轴，一个轴3个byte数据，共32*3*3 byte
 	ADXL355_Vibration_Config(&fsr);
+  
+  // 准备 DMA 读取命令
+  // ADXL355_DMA_Read_Prep(FIFO_DATA);
+  
   __HAL_GPIO_EXTI_CLEAR_FALLING_IT(GPIO_PIN_7);
   HAL_NVIC_EnableIRQ(EXTI7_IRQn);
-  SPI_ADXL355_Read_n_Bytes(FIFO_DATA,(uint8_t*)dat,32*3*3);
-  uint8_t receive = SPI_ADXL355_Read_Byte(STATUS); //读取状态寄存器
-  // printf("0x%02x\r\n",receive);
+  SPI_ADXL355_Read_n_Bytes(FIFO_DATA,(uint8_t*)dat,1*3*3);
 
   /* USER CODE END 2 */
 
@@ -113,10 +118,23 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    //uint8_t receive = SPI_ADXL355_Read_Byte(STATUS); // 读取状态寄存器
-    //printf("0x%02x\r\n", receive);
-
-    // 
+    // 定期检查缓冲区数据量
+    uint16_t count = ADXL355_Get_Buffer_Count();
+    if (count > 0)
+    {
+      printf("Buffer has %d bytes\r\n", count);
+      
+      // 当缓冲区达到一定量时读取并处理
+      if (count >= 1000)
+      {
+        uint8_t process_buf[10000];
+        uint16_t len;
+        ADXL355_Read_Buffer(process_buf, &len);
+        printf("Read %d bytes from buffer\r\n", len);
+        // 这里可以处理 process_buf 中的数据
+      }
+    }
+    
     HAL_Delay(1000);
     /* USER CODE END WHILE */
 

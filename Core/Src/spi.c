@@ -19,6 +19,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "spi.h"
+#include <string.h>
 
 /* USER CODE BEGIN 0 */
 #include "usart.h"
@@ -33,6 +34,13 @@ static uint8_t adxl_tx_buf[1 + ADXL_RX_LEN] __attribute__((aligned(4)));
 static uint8_t adxl_rx_buf[1 + ADXL_RX_LEN] __attribute__((aligned(4)));
 static volatile uint8_t adxl_busy = 0;
 
+// Memory-to-Memory DMA 配置
+#define ADXL_BUFFER_SIZE 10000  // 大缓冲区大小，可根据需要调整
+static uint8_t adxl_large_buffer[ADXL_BUFFER_SIZE] __attribute__((aligned(4)));
+static volatile uint16_t adxl_write_index = 0;  // 当前写入位置
+static volatile uint8_t mem_dma_busy = 0;
+DMA_HandleTypeDef handle_GPDMA1_Channel2;  // Memory-to-Memory DMA
+
 static void adxl_cs_low(void) { HAL_GPIO_WritePin(ADXL_CS_PORT, ADXL_CS_PIN, GPIO_PIN_RESET); }
 static void adxl_cs_high(void) { HAL_GPIO_WritePin(ADXL_CS_PORT, ADXL_CS_PIN, GPIO_PIN_SET); }
 void ADXL355_DMA_Read_Prep(uint8_t start_reg)
@@ -44,7 +52,6 @@ void ADXL355_DMA_Read_Prep(uint8_t start_reg)
 
 void ADXL355_DMA_Start(void)
 {
-
   //printf("ADXL355_DMA_Start1\r\n");
   if (HAL_SPI_GetState(&hspi1) != HAL_SPI_STATE_READY || adxl_busy)
     return;
@@ -58,6 +65,63 @@ void ADXL355_DMA_Start(void)
     adxl_busy = 0;
   }
   //printf("ADXL355_DMA_Start4\r\n");
+}
+
+// 启动 Memory-to-Memory DMA 拷贝
+static void Start_MemCopy_DMA(void)
+{
+  if (mem_dma_busy || adxl_write_index + ADXL_RX_LEN > ADXL_BUFFER_SIZE)
+  {
+    // DMA 忙或缓冲区满，跳过本次拷贝
+    return;
+  }
+  
+  mem_dma_busy = 1;
+  
+  // 启动 Memory-to-Memory DMA: 源=adxl_rx_buf[1], 目的=大缓冲区当前位置, 长度=288
+  if (HAL_DMA_Start_IT(&handle_GPDMA1_Channel2, 
+                       (uint32_t)&adxl_rx_buf[1], 
+                       (uint32_t)&adxl_large_buffer[adxl_write_index], 
+                       ADXL_RX_LEN) != HAL_OK)
+  {
+    mem_dma_busy = 0;
+  }
+}
+
+// Memory-to-Memory DMA 完成回调
+void HAL_DMA_MemCplt_Callback(DMA_HandleTypeDef *hdma)
+{
+  if (hdma->Instance == GPDMA1_Channel2)
+  {
+    adxl_write_index += ADXL_RX_LEN;
+    mem_dma_busy = 0;
+    printf("MemCopy Done, index=%d\r\n", adxl_write_index);
+    
+    // 可选：缓冲区满时的处理
+    if (adxl_write_index >= ADXL_BUFFER_SIZE - ADXL_RX_LEN)
+    {
+      printf("Buffer Full!\r\n");
+      // 这里可以触发数据处理或重置索引
+      // adxl_write_index = 0;  // 循环缓冲
+    }
+  }
+}
+
+// 获取当前缓冲区数据量
+uint16_t ADXL355_Get_Buffer_Count(void)
+{
+  return adxl_write_index;
+}
+
+// 读取并清空缓冲区
+void ADXL355_Read_Buffer(uint8_t* dest, uint16_t* len)
+{
+  *len = adxl_write_index;
+  if (*len > 0)
+  {
+    memcpy(dest, adxl_large_buffer, *len);
+    adxl_write_index = 0;
+  }
 }
 
 void get_adxl355_fifo_data(uint8_t *dat)
@@ -147,6 +211,7 @@ void get_adxl355_fifo_data(uint8_t *dat)
 SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef handle_GPDMA1_Channel0;
 DMA_HandleTypeDef handle_GPDMA1_Channel1;
+extern DMA_HandleTypeDef handle_GPDMA1_Channel2;
 
 /* SPI1 init function */
 void MX_SPI1_Init(void)
@@ -300,6 +365,38 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef *spiHandle)
     /* Optional: Enable TX DMA channel IRQ if not enabled elsewhere */
     HAL_NVIC_SetPriority(GPDMA1_Channel1_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(GPDMA1_Channel1_IRQn);
+    
+    /* Memory-to-Memory DMA Init (Channel 2) */
+    handle_GPDMA1_Channel2.Instance = GPDMA1_Channel2;
+    handle_GPDMA1_Channel2.Init.Request = DMA_REQUEST_SW;  // 软件触发
+    handle_GPDMA1_Channel2.Init.BlkHWRequest = DMA_BREQ_SINGLE_BURST;
+    handle_GPDMA1_Channel2.Init.Direction = DMA_MEMORY_TO_MEMORY;
+    handle_GPDMA1_Channel2.Init.SrcInc = DMA_SINC_INCREMENTED;
+    handle_GPDMA1_Channel2.Init.DestInc = DMA_DINC_INCREMENTED;
+    handle_GPDMA1_Channel2.Init.SrcDataWidth = DMA_SRC_DATAWIDTH_BYTE;
+    handle_GPDMA1_Channel2.Init.DestDataWidth = DMA_DEST_DATAWIDTH_BYTE;
+    handle_GPDMA1_Channel2.Init.Priority = DMA_LOW_PRIORITY_LOW_WEIGHT;
+    handle_GPDMA1_Channel2.Init.SrcBurstLength = 1;
+    handle_GPDMA1_Channel2.Init.DestBurstLength = 1;
+    handle_GPDMA1_Channel2.Init.TransferAllocatedPort = DMA_SRC_ALLOCATED_PORT0 | DMA_DEST_ALLOCATED_PORT0;
+    handle_GPDMA1_Channel2.Init.TransferEventMode = DMA_TCEM_BLOCK_TRANSFER;
+    handle_GPDMA1_Channel2.Init.Mode = DMA_NORMAL;
+    if (HAL_DMA_Init(&handle_GPDMA1_Channel2) != HAL_OK)
+    {
+      Error_Handler();
+    }
+    
+    if (HAL_DMA_ConfigChannelAttributes(&handle_GPDMA1_Channel2, DMA_CHANNEL_NPRIV) != HAL_OK)
+    {
+      Error_Handler();
+    }
+    
+    // 注册 Memory-to-Memory DMA 完成回调
+    HAL_DMA_RegisterCallback(&handle_GPDMA1_Channel2, HAL_DMA_XFER_CPLT_CB_ID, HAL_DMA_MemCplt_Callback);
+    
+    HAL_NVIC_SetPriority(GPDMA1_Channel2_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(GPDMA1_Channel2_IRQn);
+    
     /* USER CODE END SPI1_MspInit 1 */
   }
 }
@@ -349,17 +446,13 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
   if (hspi->Instance == ADXL_SPI)
   {
     adxl_cs_high();
-    get_adxl355_fifo_data(&adxl_rx_buf[1]);
-    // 有效数据在 adxl_rx_buf[1 .. 288]
-    // ADXL355_ProcessData(&adxl_rx_buf[1], ADXL_RX_LEN); // 自行实现处理
-    // for(int i=0;i<ADXL_RX_LEN;i+=3)
-    // {
-    //   printf("0x%02X 0x%02X 0x%02X \r\n",adxl_rx_buf[1+i], adxl_rx_buf[2+i], adxl_rx_buf[3+i]);
-
-    // }
+    // get_adxl355_fifo_data(&adxl_rx_buf[1]);
+    
+    // SPI DMA 完成后，启动 Memory-to-Memory DMA 拷贝到大缓冲区
+    Start_MemCopy_DMA();
+    
     adxl_busy = 0;
-
-    //printf("DMA RX Complete\r\n");
+    //printf("SPI DMA Complete\r\n");
   }
 }
 
